@@ -1,0 +1,337 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.5, maximum-scale=8, user-scalable=yes">
+<title>Viewer</title>
+<style>
+  :root { --bg:#e9e9ec; --bar:#f7f7f8; --fg:#1b1b1f; --muted:#6b6b73; --accent:#2f6fed; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1d1d20; --bar:#26262a; --fg:#ececf0; --muted:#9a9aa3; --accent:#7aa2ff; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #bar { position:sticky; top:0; left:0; z-index:10; display:flex; align-items:center; gap:10px;
+    padding:8px 12px; background:var(--bar); border-bottom:1px solid rgba(128,128,128,.25); }
+  #name { flex:1; min-width:0; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  button { font:inherit; font-size:14px; padding:7px 14px; border-radius:8px; border:0;
+    background:var(--accent); color:#fff; }
+  #msg { padding:28px 20px; text-align:center; color:var(--muted); line-height:1.5; }
+  #msg.err { color:#c0392b; }
+  #home { padding:48px 24px; text-align:center; }
+  #home button { font-size:17px; padding:14px 28px; }
+  #home p { color:var(--muted); font-size:13px; line-height:1.6; max-width:420px; margin:22px auto 0; }
+  #view { padding:8px 0 40px; }
+
+  /* PDF */
+  .pdfpage { margin:0 auto 8px; background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.25); position:relative; }
+  .pdfpage canvas { display:block; width:100%; height:100%; }
+
+  /* Images */
+  #view img.pic { display:block; max-width:100%; height:auto; margin:0 auto; }
+
+  /* Text */
+  pre.txt { margin:0; padding:12px 14px; white-space:pre-wrap; word-wrap:break-word;
+    font:13px/1.5 ui-monospace, Menlo, Consolas, monospace; background:var(--bar); }
+
+  /* Spreadsheets */
+  #tabs { display:flex; gap:6px; overflow-x:auto; padding:8px 10px; position:sticky; top:49px; z-index:9; background:var(--bg); }
+  #tabs button { background:var(--bar); color:var(--fg); white-space:nowrap; padding:6px 12px; }
+  #tabs button.on { background:var(--accent); color:#fff; }
+  .sheet { overflow:auto; padding:0 10px; }
+  .sheet table { border-collapse:collapse; background:#fff; color:#000; font-size:13px; }
+  .sheet td, .sheet th { border:1px solid #d0d0d6; padding:3px 7px; white-space:pre; vertical-align:top; }
+  .note { padding:6px 12px; font-size:12px; color:var(--muted); }
+
+  /* Slides / docs */
+  #view .docx-wrapper { background:transparent !important; padding:8px 0 !important; }
+  .htmlframe { width:100%; border:0; background:#fff; display:block; min-height:80vh; }
+  .slide-note { padding:8px 14px; font-size:12px; color:var(--muted); }
+  .legacy h3 { margin:18px 14px 6px; font-size:13px; color:var(--muted); font-weight:600; }
+  .legacy .slide { margin:0 14px; padding:12px; background:var(--bar); border-radius:8px; white-space:pre-wrap; font-size:14px; line-height:1.5; }
+</style>
+<script src="lib/jszip.min.js"></script>
+<script src="lib/xlsx.full.min.js"></script>
+<script src="lib/docx-preview.min.js"></script>
+<script src="lib/pptx-preview.bundle.js"></script>
+<script src="lib/pdf.min.js"></script>
+</head>
+<body>
+<div id="bar">
+  <div id="name"></div>
+  <button id="openBtn">Open</button>
+</div>
+<div id="home" hidden>
+  <button id="homeBtn">Open a file</button>
+  <p>PDF · Word (.docx, .doc) · Excel (.xlsx, .xls, .csv) · PowerPoint (.pptx, .ppt) · HTML · images · plain text.<br>
+     View only. Everything runs offline on this phone.</p>
+</div>
+<div id="msg" hidden></div>
+<div id="view"></div>
+
+<script>
+(function () {
+  "use strict";
+  var q = new URLSearchParams(location.search);
+  var name = q.get("name") || "";
+  var ext = (name.indexOf(".") >= 0 ? name.split(".").pop() : "").toLowerCase();
+  var view = document.getElementById("view");
+  var msgEl = document.getElementById("msg");
+
+  function pick() { try { Native.pick(); } catch (e) {} }
+  document.getElementById("openBtn").onclick = pick;
+  document.getElementById("homeBtn").onclick = pick;
+
+  function show(text, isErr) {
+    msgEl.hidden = false; msgEl.className = isErr ? "err" : "";
+    msgEl.textContent = text;
+  }
+  function clearMsg() { msgEl.hidden = true; }
+
+  if (!name) {
+    document.getElementById("name").textContent = "Viewer";
+    document.getElementById("home").hidden = false;
+    document.getElementById("openBtn").hidden = true;
+    return;
+  }
+  document.getElementById("name").textContent = name;
+  show("Opening…");
+
+  var IMG = { png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", gif:"image/gif", webp:"image/webp",
+              bmp:"image/bmp", svg:"image/svg+xml", avif:"image/avif", ico:"image/x-icon" };
+  var TEXT = ["txt","md","log","json","xml","yml","yaml","ini","cfg","rtf","tex","srt","vtt"];
+  var SHEET = ["xlsx","xlsm","xlsb","xls","ods","csv","tsv"];
+
+  fetch("/doc/file?t=" + Date.now(), { cache: "no-store" })
+    .then(function (r) { if (!r.ok) throw new Error("Could not read the file."); return r.arrayBuffer(); })
+    .then(function (buf) { return route(buf); })
+    .then(function () { clearMsg(); })
+    .catch(function (e) { show("Couldn't display this file.\n" + (e && e.message ? e.message : e), true); });
+
+  async function sniff(buf) {
+    var u = new Uint8Array(buf.slice(0, 8));
+    if (u[0] === 0x25 && u[1] === 0x50) return "pdf";
+    if (u[0] === 0x89 && u[1] === 0x50) return "png";
+    if (u[0] === 0xFF && u[1] === 0xD8) return "jpg";
+    if (u[0] === 0x50 && u[1] === 0x4B) {
+      var z = await JSZip.loadAsync(buf);
+      if (z.file("word/document.xml")) return "docx";
+      if (z.file("xl/workbook.xml")) return "xlsx";
+      if (z.file("ppt/presentation.xml")) return "pptx";
+      return "zip";
+    }
+    if (u[0] === 0xD0 && u[1] === 0xCF) {
+      var c = XLSX.CFB.read(new Uint8Array(buf), { type: "array" });
+      if (XLSX.CFB.find(c, "WordDocument")) return "doc";
+      if (XLSX.CFB.find(c, "PowerPoint Document")) return "ppt";
+      if (XLSX.CFB.find(c, "Workbook") || XLSX.CFB.find(c, "Book")) return "xls";
+    }
+    return "txt";
+  }
+
+  async function route(buf) {
+    var kind = ext;
+    var known = ["pdf","docx","doc","pptx","ppt","html","htm","xhtml"].concat(Object.keys(IMG), TEXT, SHEET);
+    if (known.indexOf(kind) < 0) kind = await sniff(buf);
+    if (kind === "docm" || kind === "dotx") kind = "docx";
+    if (kind === "pptm" || kind === "ppsx") kind = "pptx";
+    if (kind === "pdf") return renderPdf(buf);
+    if (kind === "docx") return renderDocx(buf);
+    if (kind === "doc") return renderLegacyDoc(buf);
+    if (kind === "pptx") return renderPptx(buf);
+    if (kind === "ppt") return renderLegacyPpt(buf);
+    if (SHEET.indexOf(kind) >= 0) return renderSheet(buf);
+    if (IMG[kind]) return renderImage(buf, IMG[kind]);
+    if (kind === "html" || kind === "htm" || kind === "xhtml") return renderHtml(buf);
+    if (kind === "zip") throw new Error("This archive isn't a supported document.");
+    return renderText(buf);
+  }
+
+  /* ---------- PDF ---------- */
+  async function renderPdf(buf) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "lib/pdf.worker.min.js";
+    var doc = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+    var width = Math.min(window.innerWidth, 900);
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var holders = [];
+    for (var i = 1; i <= doc.numPages; i++) {
+      var page = await doc.getPage(i);
+      var vp1 = page.getViewport({ scale: 1 });
+      var scale = width / vp1.width;
+      var vp = page.getViewport({ scale: scale });
+      var div = document.createElement("div");
+      div.className = "pdfpage";
+      div.style.width = Math.floor(vp.width) + "px";
+      div.style.height = Math.floor(vp.height) + "px";
+      div._page = page; div._scale = scale; div._done = false;
+      view.appendChild(div);
+      holders.push(div);
+      if (i === 1) clearMsg();
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        var d = en.target;
+        if (en.isIntersecting && !d._done) {
+          d._done = true;
+          var vp = d._page.getViewport({ scale: d._scale * dpr });
+          var c = document.createElement("canvas");
+          c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+          d.appendChild(c);
+          d._page.render({ canvasContext: c.getContext("2d"), viewport: vp });
+        }
+      });
+    }, { rootMargin: "1200px 0px" });
+    holders.forEach(function (h) { io.observe(h); });
+  }
+
+  /* ---------- Word ---------- */
+  async function renderDocx(buf) {
+    var box = document.createElement("div");
+    view.appendChild(box);
+    await docx.renderAsync(buf, box, null, {
+      className: "docx", inWrapper: true, ignoreWidth: false, ignoreHeight: false,
+      breakPages: true, renderHeaders: true, renderFooters: true, renderFootnotes: true
+    });
+    fitWidth(box, ".docx-wrapper > section.docx, .docx-wrapper section");
+  }
+  function fitWidth(box, sel) {
+    var secs = box.querySelectorAll(sel), max = 0;
+    secs.forEach(function (s) { max = Math.max(max, s.offsetWidth); });
+    if (max > 0 && max > window.innerWidth - 8) box.style.zoom = (window.innerWidth - 8) / max;
+  }
+
+  /* ---------- PowerPoint ---------- */
+  async function renderPptx(buf) {
+    var box = document.createElement("div");
+    view.appendChild(box);
+    var w = Math.min(960, window.innerWidth - 16);
+    var p = pptxPreview.init(box, { width: w, height: Math.round(w * 9 / 16) });
+    await p.preview(buf);
+  }
+
+  /* ---------- Spreadsheets ---------- */
+  function renderSheet(buf) {
+    var wb = XLSX.read(new Uint8Array(buf), { type: "array", cellDates: true });
+    var tabs = document.createElement("div"); tabs.id = "tabs";
+    var holder = document.createElement("div");
+    if (wb.SheetNames.length > 1) view.appendChild(tabs);
+    view.appendChild(holder);
+    function showSheet(i) {
+      Array.prototype.forEach.call(tabs.children, function (b, k) { b.className = k === i ? "on" : ""; });
+      var ws = wb.Sheets[wb.SheetNames[i]];
+      holder.innerHTML = "";
+      if (!ws || !ws["!ref"]) { holder.innerHTML = '<div class="note">Empty sheet</div>'; return; }
+      var r = XLSX.utils.decode_range(ws["!ref"]), note = "";
+      if (r.e.r > 4999) { r.e.r = 4999; note = "Showing the first 5,000 rows."; }
+      var w2 = Object.assign({}, ws, { "!ref": XLSX.utils.encode_range(r) });
+      var html = XLSX.utils.sheet_to_html(w2, { header: "", footer: "" });
+      var d = document.createElement("div"); d.className = "sheet"; d.innerHTML = html;
+      holder.appendChild(d);
+      if (note) { var n = document.createElement("div"); n.className = "note"; n.textContent = note; holder.appendChild(n); }
+    }
+    wb.SheetNames.forEach(function (s, i) {
+      var b = document.createElement("button"); b.textContent = s; b.onclick = function () { showSheet(i); };
+      tabs.appendChild(b);
+    });
+    showSheet(0);
+  }
+
+  /* ---------- Images ---------- */
+  function renderImage(buf, mime) {
+    return new Promise(function (res, rej) {
+      var img = new Image(); img.className = "pic";
+      img.onload = function () { res(); }; img.onerror = function () { rej(new Error("Unsupported image.")); };
+      img.src = URL.createObjectURL(new Blob([buf], { type: mime }));
+      view.appendChild(img);
+    });
+  }
+
+  /* ---------- HTML (scripts disabled) ---------- */
+  function renderHtml(buf) {
+    var html = new TextDecoder("utf-8").decode(buf);
+    var f = document.createElement("iframe");
+    f.className = "htmlframe";
+    f.setAttribute("sandbox", "allow-same-origin");
+    f.srcdoc = html;
+    f.onload = function () {
+      try { f.style.height = Math.max(f.contentDocument.documentElement.scrollHeight, 400) + "px"; } catch (e) {}
+    };
+    view.appendChild(f);
+    var n = document.createElement("div"); n.className = "slide-note";
+    n.textContent = "Scripts are turned off; external resources won't load.";
+    view.appendChild(n);
+  }
+
+  /* ---------- Text ---------- */
+  function renderText(buf) {
+    var pre = document.createElement("pre"); pre.className = "txt";
+    pre.textContent = new TextDecoder("utf-8").decode(buf);
+    view.appendChild(pre);
+  }
+
+  /* ---------- Legacy .doc (best-effort text only) ---------- */
+  function renderLegacyDoc(buf) {
+    var c = XLSX.CFB.read(new Uint8Array(buf), { type: "array" });
+    var e = XLSX.CFB.find(c, "WordDocument");
+    if (!e) throw new Error("Not a Word 97–2003 file.");
+    var d = e.content;
+    var dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    var fcMin = dv.getUint32(0x18, true), fcMac = dv.getUint32(0x1C, true);
+    if (!(fcMac > fcMin) || fcMac > d.length) { fcMin = 0x200; fcMac = d.length; }
+    var seg = d.subarray(fcMin, fcMac), zeros = 0;
+    for (var i = 0; i < Math.min(seg.length, 400); i++) if (seg[i] === 0) zeros++;
+    var text = zeros > 60 ? new TextDecoder("utf-16le").decode(seg) : new TextDecoder("windows-1252").decode(seg);
+    text = text.replace(/\r\n?/g, "\n").replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, " ")
+               .replace(/\x07/g, "\t").replace(/[ \t]{3,}/g, "  ");
+    var n = document.createElement("div"); n.className = "slide-note";
+    n.textContent = "Old .doc format: showing text only, without layout or images.";
+    view.appendChild(n);
+    var pre = document.createElement("pre"); pre.className = "txt"; pre.textContent = text.trim();
+    view.appendChild(pre);
+  }
+
+  /* ---------- Legacy .ppt (best-effort text only) ---------- */
+  function renderLegacyPpt(buf) {
+    var c = XLSX.CFB.read(new Uint8Array(buf), { type: "array" });
+    var e = XLSX.CFB.find(c, "PowerPoint Document");
+    if (!e) throw new Error("Not a PowerPoint 97–2003 file.");
+    var d = e.content;
+    var dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    var slides = [], cur = null;
+    function walk(start, end) {
+      var p = start;
+      while (p + 8 <= end) {
+        var verInst = dv.getUint16(p, true), type = dv.getUint16(p + 2, true), len = dv.getUint32(p + 4, true);
+        var body = p + 8, next = body + len;
+        if (next > end) break;
+        if ((verInst & 0xF) === 0xF) {
+          if (type === 0x03EE) { cur = []; slides.push(cur); }
+          walk(body, next);
+        } else if (type === 0x0FA0 || type === 0x0FA8) {
+          var bytes = d.subarray(body, next);
+          var t = type === 0x0FA0 ? new TextDecoder("utf-16le").decode(bytes) : new TextDecoder("windows-1252").decode(bytes);
+          t = t.replace(/\r\n?|\v/g, "\n").replace(/[\x00-\x08\x0E-\x1F]/g, "").trim();
+          if (t) { if (!cur) { cur = []; slides.push(cur); } cur.push(t); }
+        }
+        p = next;
+      }
+    }
+    walk(0, d.length);
+    var n = document.createElement("div"); n.className = "slide-note";
+    n.textContent = "Old .ppt format: showing slide text only, without layout or images.";
+    view.appendChild(n);
+    var wrap = document.createElement("div"); wrap.className = "legacy";
+    slides.forEach(function (s, i) {
+      if (!s.length) return;
+      var h = document.createElement("h3"); h.textContent = "Slide " + (i + 1);
+      var b = document.createElement("div"); b.className = "slide"; b.textContent = s.join("\n\n");
+      wrap.appendChild(h); wrap.appendChild(b);
+    });
+    if (!wrap.children.length) throw new Error("No readable text found.");
+    view.appendChild(wrap);
+  }
+})();
+</script>
+</body>
+</html>
