@@ -15,3 +15,6 @@ Install it from the Releases page.
 - Rendering uses bundled JS libraries (pdf.js, docx-preview, SheetJS, pptx-preview) inside a WebView.
 - HTML files render with scripts disabled.
 - Spreadsheets show values and merged cells but not cell colours; capped at 5,000 rows per sheet.
+
+## Features
+Page counter and go-to-page, find in document with highlights, pinch / double-tap / button zoom, night mode, remembers your place in each file, recent files, keeps the screen on while reading.
